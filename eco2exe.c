@@ -24,7 +24,11 @@
 #include <string.h>
 #include <stdlib.h>
 
-#define MAXSEC 64
+/* f_nscns is a 16 bit field, so this is the largest possible section
+   count.  The section tables are allocated dynamically below: a kernel
+   linked with section attributes can easily have far more than the
+   couple of dozen sections a plain a.out-style binary has. */
+#define MAXSEC 65536
 
 unsigned int char2int(unsigned char *foo)
 {
@@ -56,10 +60,10 @@ int main(int argc, char *argv[])
   int i,j,n;
   int nscns;
   int nload=0;
-  int load[MAXSEC];
-  unsigned int sec_paddr[MAXSEC];
-  unsigned int sec_size[MAXSEC];
-  unsigned int sec_scnptr[MAXSEC];
+  int *load;
+  unsigned int *sec_paddr;
+  unsigned int *sec_size;
+  unsigned int *sec_scnptr;
   unsigned int entry;
   unsigned int start;
   unsigned int end;
@@ -133,6 +137,16 @@ int main(int argc, char *argv[])
       exit(-1);
     }
 
+  load      = (int *)malloc (nscns * sizeof (int));
+  sec_paddr = (unsigned int *)malloc (nscns * sizeof (unsigned int));
+  sec_size  = (unsigned int *)malloc (nscns * sizeof (unsigned int));
+  sec_scnptr= (unsigned int *)malloc (nscns * sizeof (unsigned int));
+  if ((load==NULL)||(sec_paddr==NULL)||(sec_size==NULL)||(sec_scnptr==NULL))
+    {
+      printf("ERROR: out of memory (%d sections)\n",nscns);
+      exit(-1);
+    }
+
   /* --- optional header: entry point (aouthdr offset 0x10 -> file offset 0x24) --- */
   fseek(ecoff, 0x24, SEEK_SET);
   for(i=0;i<4;i++)
@@ -191,6 +205,9 @@ int main(int argc, char *argv[])
 
   span=end-start; /* image is the whole span, gaps included */
   size=span;
+
+  printf("%d sections, %d loadable; entry 0x%08x; load 0x%08x..0x%08x (span %u bytes)\n",
+	 nscns, nload, entry, start, end, span);
 
   if (patch)
     {
@@ -265,6 +282,11 @@ int main(int argc, char *argv[])
 
   fclose(exe);
   fclose(ecoff);
+
+  free (load);
+  free (sec_paddr);
+  free (sec_size);
+  free (sec_scnptr);
 
   return 0;
 }
