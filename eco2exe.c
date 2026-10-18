@@ -22,6 +22,9 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
+
+#define MAXSEC 64
 
 unsigned int char2int(unsigned char *foo)
 {
@@ -44,14 +47,23 @@ void usage(void)
   exit(0);
 }
 
-void main(int argc, char *argv[])
+int main(int argc, char *argv[])
 {
   FILE *ecoff;
   FILE *exe;
   unsigned char data[4];
   char filename[256];
-  int i,j,k=2;
-  unsigned int header_data[14];
+  int i,j,n;
+  int nscns;
+  int nload=0;
+  int load[MAXSEC];
+  unsigned int sec_paddr[MAXSEC];
+  unsigned int sec_size[MAXSEC];
+  unsigned int sec_scnptr[MAXSEC];
+  unsigned int entry;
+  unsigned int start;
+  unsigned int end;
+  unsigned int span;
   unsigned int size;
   unsigned int address;
   unsigned int pc0;
@@ -75,10 +87,13 @@ void main(int argc, char *argv[])
 	    usage();
 	  }
       else
-	strncpy(filename,argv[i],256);
+	{
+	  strncpy(filename,argv[i],sizeof(filename)-5);
+	  filename[sizeof(filename)-5]=0;
+	}
     }
-  
-  ecoff=fopen(filename, "r");
+
+  ecoff=fopen(filename, "rb");
 
   if (!ecoff)
     {
@@ -88,7 +103,7 @@ void main(int argc, char *argv[])
 
   strcat(filename, ".exe"); /* output filename is same as input but with .exe appended */
 
-  exe=fopen(filename, "w");
+  exe=fopen(filename, "wb");
 
   if (!exe)
     {
@@ -96,55 +111,94 @@ void main(int argc, char *argv[])
       exit(-1);
     }
 
+  /* --- file header --- */
+  fseek(ecoff, 0, SEEK_SET);
   for(i=0;i<2;i++)
-    fscanf(ecoff, "%c", &data[i]);
-  
+    data[i]=fgetc(ecoff);
+
   if ((data[0]!=0x62)||(data[1]!=0x01))
     {
       printf("ERROR: Not a MIPSEL-LE binary!\n");
       exit(-1);
     }
-  
-  fseek(ecoff, 0x24, SEEK_SET);
 
-  for(i=0;i<4;i++)
-    fscanf(ecoff, "%c", &data[i]);
-  
-  header_data[0]=char2int(data);
+  for(i=0;i<2;i++)
+    data[i]=fgetc(ecoff);
 
-  fseek(ecoff, 0x48, SEEK_SET);
+  nscns=data[0]+(data[1]<<8); /* f_nscns, offset 0x02 */
 
-  for(i=0;i<4;i++)
-    fscanf(ecoff, "%c", &data[i]);
-  
-  header_data[1]=char2int(data);
-
-  for(i=0;i<4;i++)
+  if ((nscns<1)||(nscns>MAXSEC))
     {
-      fseek(ecoff, 0x54+i*0x28, SEEK_SET);
-      for(j=0;j<4;j++)
-	fscanf(ecoff, "%c", &data[j]);
-      header_data[k]=char2int(data);
-      k++;
-      fseek(ecoff, 0x54+i*0x28+0x08, SEEK_SET);
-      for(j=0;j<4;j++)
-	fscanf(ecoff, "%c", &data[j]);
-      header_data[k]=char2int(data);
-      k++;
-      for(j=0;j<4;j++)
-	fscanf(ecoff, "%c", &data[j]);
-      header_data[k]=char2int(data);
-      k++;
+      printf("ERROR: %d sections (unsupported)\n",nscns);
+      exit(-1);
     }
-    
-  size=(header_data[11]-header_data[2])+header_data[12];
+
+  /* --- optional header: entry point (aouthdr offset 0x10 -> file offset 0x24) --- */
+  fseek(ecoff, 0x24, SEEK_SET);
+  for(i=0;i<4;i++)
+    data[i]=fgetc(ecoff);
+  entry=char2int(data);
+
+  /* --- section headers (start at 0x4c, 0x28 bytes each) ---
+     name @+0x00, s_paddr @+0x08, s_size @+0x10, s_scnptr @+0x14 */
+  for(i=0;i<nscns;i++)
+    {
+      fseek(ecoff, 0x4c+i*0x28+0x08, SEEK_SET);
+      for(j=0;j<4;j++)
+	data[j]=fgetc(ecoff);
+      sec_paddr[i]=char2int(data);
+
+      fseek(ecoff, 0x4c+i*0x28+0x10, SEEK_SET);
+      for(j=0;j<4;j++)
+	data[j]=fgetc(ecoff);
+      sec_size[i]=char2int(data);
+
+      fseek(ecoff, 0x4c+i*0x28+0x14, SEEK_SET);
+      for(j=0;j<4;j++)
+	data[j]=fgetc(ecoff);
+      sec_scnptr[i]=char2int(data);
+    }
+
+  /* keep the sections that actually have data in the file (bss has no
+     file data and is cleared at runtime), sorted by load address */
+  for(i=0;i<nscns;i++)
+    if ((sec_size[i]!=0)&&(sec_scnptr[i]!=0))
+      {
+	for(n=nload;n>0;n--)
+	  {
+	    if (sec_paddr[load[n-1]]<=sec_paddr[i])
+	      break;
+	    load[n]=load[n-1];
+	  }
+	load[n]=i;
+	nload++;
+      }
+
+  if (nload==0)
+    {
+      printf("ERROR: no loadable sections\n");
+      exit(-1);
+    }
+
+  start=sec_paddr[load[0]];
+  end=start;
+  for(n=0;n<nload;n++)
+    {
+      i=load[n];
+      if ((sec_paddr[i]+sec_size[i])>end)
+	end=sec_paddr[i]+sec_size[i];
+    }
+
+  span=end-start; /* image is the whole span, gaps included */
+  size=span;
+
   if (patch)
     {
-      pc0=header_data[2]+size;
+      pc0=start+size;
       size+=16;
     }
   else
-    pc0=header_data[0];
+    pc0=entry;
 
   fprintf(exe, "PS-X EXE");
   int2char(0, data);
@@ -154,7 +208,7 @@ void main(int argc, char *argv[])
   fprintf(exe, "%c%c%c%c", data[0], data[1], data[2], data[3]); /* pc0 */
   int2char(0, data);
   fprintf(exe, "%c%c%c%c", data[0], data[1], data[2], data[3]); /* gp0 */
-  int2char(header_data[2], data);
+  int2char(start, data);
   fprintf(exe, "%c%c%c%c", data[0], data[1], data[2], data[3]); /* t_addr */
   int2char(size, data);
   fprintf(exe, "%c%c%c%c", data[0], data[1], data[2], data[3]); /* t_size */
@@ -171,52 +225,29 @@ void main(int argc, char *argv[])
   for(i=0;i<1992;i++)
     fprintf(exe, "%c", 0);
 
-  fseek(ecoff, header_data[4], SEEK_SET);
-  address=header_data[2];
-  for(i=0;i<header_data[3];i++)
+  /* copy every loadable section to its address, zero filling the gaps */
+  address=start;
+  for(n=0;n<nload;n++)
     {
-      fscanf(ecoff, "%c", &data[0]);
-      fprintf(exe, "%c", data[0]);
-      address++;
-    }
-  fseek(ecoff, header_data[7], SEEK_SET);
-  if (address!=header_data[5]) /* wonder if this can happen */
-    for(i=address;i<=header_data[5];i++)
-      {
-	fprintf(exe, "%c", 0);
-	address++;
-      }
-  for(i=0;i<header_data[6];i++)
-    {
-      fscanf(ecoff, "%c", &data[0]);
-      fprintf(exe, "%c", data[0]);
-      address++;
-    }
-  fseek(ecoff, header_data[10], SEEK_SET);
-  if (address!=header_data[8]) /* wonder if this can happen */
-    for(i=address;i<=header_data[8];i++)
-      {      
-	fprintf(exe, "%c", 0);
-	address++;
-      }
-  for(i=0;i<header_data[9];i++)
-    {
-      fscanf(ecoff, "%c", &data[0]);
-      fprintf(exe, "%c", data[0]);
-      address++;
+      i=load[n];
+      while (address<sec_paddr[i])
+	{
+	  fprintf(exe, "%c", 0);
+	  address++;
+	}
+      fseek(ecoff, sec_scnptr[i], SEEK_SET);
+      for(j=0;j<(int)sec_size[i];j++)
+	{
+	  int c=fgetc(ecoff);
+	  fprintf(exe, "%c", (c==EOF)?0:c);
+	  address++;
+	}
     }
 
-  fseek(ecoff, header_data[13], SEEK_SET);
-  if (address!=header_data[11]) /* wonder if this can happen */
-    for(i=address;i<=header_data[11];i++)
-      {
-	fprintf(exe, "%c", 0);
-	address++;
-      }
-  for(i=0;i<header_data[12];i++)
+  /* never write less than the t_size we advertised */
+  while (address<(start+span))
     {
-      fscanf(ecoff, "%c", &data[0]);
-      fprintf(exe, "%c", data[0]);
+      fprintf(exe, "%c", 0);
       address++;
     }
 
@@ -226,7 +257,7 @@ void main(int argc, char *argv[])
       fprintf(exe, "%c%c%c%c", data[0], data[1], data[2], data[3]);
       int2char(0, data); /* nop */
       fprintf(exe, "%c%c%c%c", data[0], data[1], data[2], data[3]);
-      int2char(0x08000000 + ((header_data[0]&0x03ffffff)>>2),data); /*j realpc0 */
+      int2char(0x08000000 + ((entry&0x03ffffff)>>2),data); /*j realpc0 */
       fprintf(exe, "%c%c%c%c", data[0], data[1], data[2], data[3]);
       int2char(0, data); /* nop */
       fprintf(exe, "%c%c%c%c", data[0], data[1], data[2], data[3]);
@@ -235,10 +266,5 @@ void main(int argc, char *argv[])
   fclose(exe);
   fclose(ecoff);
 
+  return 0;
 }
-
-
-  
-  
-
-  
